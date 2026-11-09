@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -267,9 +268,39 @@ def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, 
                         rec["vlm"]["take"] = {"shots": [r["index"] for r in unit], "piece": i + 1}
 
             units = vlm_units(shot_records, max_shots_vlm)
+            asked_records = [record for unit in units for record in unit]
+            progress = {"seen": 0, "calls": 0}
+            progress_lock = threading.Lock()
+
+            def log_vlm_progress(phase: str) -> None:
+                usage = client.usage_snapshot()
+                LOG.info(
+                    "VF_REVERSE total=%d asked=%d seen=%d calls=%d/%d phase=%s tokens=%d prompt=%d completion=%d",
+                    len(shot_records),
+                    len(asked_records),
+                    progress["seen"],
+                    progress["calls"],
+                    len(units),
+                    phase,
+                    usage["total"],
+                    usage["prompt"],
+                    usage["completion"],
+                )
+
+            def run_unit_counted(unit: list[dict]) -> None:
+                try:
+                    run_unit(unit)
+                finally:
+                    with progress_lock:
+                        progress["calls"] += 1
+                        progress["seen"] += len(unit)
+                    log_vlm_progress("shots")
+
+            log_vlm_progress("shots")
             with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-                list(pool.map(run_unit, units))
+                list(pool.map(run_unit_counted, units))
             if whole_vlm:
+                log_vlm_progress("whole")
                 try:
                     cuts = ", ".join(f"{r['start']:.2f}" for r in shot_records)
                     prompt = WHOLE_PROMPT.format(shots=cuts) + prompt_lang_note()
@@ -285,7 +316,15 @@ def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, 
                     vlm_info["errors"].append(f"whole: {str(exc)[:160]}")
             asked = [r for u in units for r in u]
             ok_shots = sum(1 for r in asked if r.get("vlm"))
-            vlm_info.update(ok_shots=ok_shots, asked_shots=len(asked), calls=len(units), whole_ok=whole is not None)
+            usage = client.usage_snapshot()
+            log_vlm_progress("done")
+            vlm_info.update(
+                ok_shots=ok_shots,
+                asked_shots=len(asked),
+                calls=len(units),
+                whole_ok=whole is not None,
+                tokens={"prompt": usage["prompt"], "completion": usage["completion"], "total": usage["total"]},
+            )
             if ok_shots == len(asked) and (whole is not None or not whole_vlm):
                 vlm_info.update(used=True, status="ok")
             elif ok_shots or whole is not None:

@@ -102,6 +102,12 @@ def _data_uri(path: Path, mime: str) -> str:
     return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
 
 
+def _usage_count(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(0, int(value))
+
+
 def parse_json(text: str) -> dict:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
@@ -123,6 +129,7 @@ class VLMClient:
         self.cache_dir = cache_dir
         self.dead_requests = 0
         self.models = list(cfg.models)  # reordered: the last model that answered goes first
+        self.usage = {"prompt": 0, "completion": 0, "total": 0}
         self._lock = threading.Lock()
         host = re.sub(r"^https?://", "", cfg.base_url).split("/")[0].rsplit("@", 1)[-1].split(":")[0]
         if cfg.base_url.lower().startswith("http://") and host not in ("localhost", "127.0.0.1", "::1", "[::1]"):
@@ -134,13 +141,38 @@ class VLMClient:
     def gave_up(self) -> bool:
         return self.dead_requests >= self.MAX_DEAD_REQUESTS
 
-    def _post(self, model: str, content: list[dict], max_tokens: int) -> str:
-        body = json.dumps({"model": model, "messages": [{"role": "user", "content": content}],
-                           "max_tokens": max_tokens, "temperature": 0.2}).encode()
+    def add_usage(self, usage: dict | None) -> None:
+        if not isinstance(usage, dict):
+            return
+        prompt = _usage_count(usage.get("prompt_tokens"))
+        completion = _usage_count(usage.get("completion_tokens"))
+        total = _usage_count(usage.get("total_tokens"))
+        if total <= 0:
+            total = prompt + completion
+        if prompt <= 0 and completion <= 0 and total <= 0:
+            return
+        with self._lock:
+            self.usage["prompt"] += prompt
+            self.usage["completion"] += completion
+            self.usage["total"] += total
+
+    def usage_snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self.usage)
+
+    def _post(self, model: str, content: list[dict], max_tokens: int) -> tuple[str, dict]:
+        payload = {"model": model, "messages": [{"role": "user", "content": content}],
+                   "max_tokens": max_tokens, "temperature": 0.2}
+        # DeepSeek V4 默认会把额度用在思考上，正文为空，分镜提示词就写不出来。
+        if "deepseek" in model.lower():
+            payload["thinking"] = {"type": "disabled"}
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(self.cfg.base_url + "/chat/completions", data=body, method="POST",
                                      headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.cfg.api_key}"})
         with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
             data = json.loads(resp.read().decode())
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        self.add_usage(usage)
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:  # e.g. "choices": [] after a safety block -> try the next model
@@ -149,7 +181,7 @@ class VLMClient:
             content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
         if not isinstance(content, str) or not content.strip():
             raise ValueError("empty VLM answer")
-        return content
+        return content, usage
 
     def ask_json(self, prompt: str, media: list[tuple[Path, str]], max_tokens: int = 4096) -> dict:
         # Use the configured order, not self.models: successful fallbacks reorder
@@ -172,7 +204,7 @@ class VLMClient:
             for attempt in range(2):
                 try:
                     t = time.time()
-                    text = self._post(model, content, max_tokens)
+                    text, _usage = self._post(model, content, max_tokens)
                     out = parse_json(text)
                     out["_model"] = model
                     out["_seconds"] = round(time.time() - t, 1)
