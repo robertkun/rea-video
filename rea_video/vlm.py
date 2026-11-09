@@ -328,6 +328,12 @@ from .aspects import prompt_block as _aspect_block  # noqa: E402
 SHOT_PROMPT = SHOT_PROMPT.replace("<<SHOT_ASPECTS>>", _aspect_block(video=False))
 WHOLE_PROMPT = WHOLE_PROMPT.replace("<<VIDEO_ASPECTS>>", _aspect_block(video=True))
 
+# Image-only models (DeepSeek flash and similar) cannot take a video/mp4 part.
+FRAMES_WHOLE_NOTE = """
+这次没有整段视频，只有按时间均匀抽出的关键帧。请只根据这些画面判断结构、角色、风格和制作方式。
+你听不到声音：narration、music、sfx、ambience、mix 里无法从画面确认的内容写 unknown 或留空，不要编造听感、歌词或 BPM。
+"""
+
 
 def shot_hints(features: dict, facts: dict, det_top: str, det_prob: float) -> str:
     keys = ["noise_sigma", "temporal_noise", "flat_ratio", "palette95", "dup_ratio", "camera", "kenburns_score", "local_motion_ratio"]

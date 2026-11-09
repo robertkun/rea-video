@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rea-video · DeepSeek 拆解</title>
+<style>
+:root {
+  --bg: #f6f4f1;
+  --fg: #1c1917;
+  --muted: #78716c;
+  --card: #fff;
+  --line: #e7e5e4;
+  --accent: #0f766e;
+  --accent-2: #115e59;
+  --danger: #b91c1c;
+  --warn: #92400e;
+  --shadow: 0 1px 2px rgba(28, 25, 23, .06), 0 12px 32px rgba(28, 25, 23, .06);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1917;
+    --fg: #f5f5f4;
+    --muted: #a8a29e;
+    --card: #292524;
+    --line: #44403c;
+    --accent: #2dd4bf;
+    --accent-2: #99f6e4;
+    --danger: #fca5a5;
+    --warn: #fcd34d;
+    --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(900px 420px at 10% -10%, rgba(15, 118, 110, .12), transparent 60%),
+    var(--bg);
+  color: var(--fg);
+  font: 15px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+main { max-width: 980px; margin: 0 auto; padding: 36px 18px 64px; }
+header h1 { font-size: 28px; letter-spacing: -.03em; margin: 0 0 6px; }
+header h1 span { color: var(--accent); }
+header p { margin: 0; color: var(--muted); max-width: 62ch; }
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+  margin-top: 18px;
+}
+label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
+input.warn { border-color: var(--warn); }
+input[type="text"], input[type="password"], input[type="number"], select {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font: inherit;
+}
+.row { display: grid; grid-template-columns: 1.4fr .8fr .6fr; gap: 12px; }
+@media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
+.hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+.drop {
+  display: block;
+  margin-top: 14px;
+  border: 1.5px dashed var(--line);
+  border-radius: 12px;
+  padding: 28px 16px;
+  text-align: center;
+  background: var(--bg);
+  cursor: pointer;
+}
+.drop.over { border-color: var(--accent); }
+.drop strong { display: block; font-size: 16px; }
+.drop input { display: none; }
+.check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; color: var(--muted); }
+.check input { accent-color: var(--accent); }
+button {
+  margin-top: 16px;
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 18px;
+  font: 600 15px/1 inherit;
+  cursor: pointer;
+}
+button:disabled { opacity: .55; cursor: progress; }
+button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+.err { color: var(--danger); margin: 10px 0 0; }
+.warn { color: var(--warn); }
+pre.log {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--muted);
+}
+.mix { display: flex; height: 32px; border-radius: 8px; overflow: hidden; margin: 12px 0; }
+.bar { color: #fff; font-size: 12px; padding: 6px 8px; white-space: nowrap; overflow: hidden; }
+.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.shot { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--bg); }
+.shot img { width: 100%; height: 180px; object-fit: contain; background: #111; display: block; }
+.shot .meta { padding: 10px 12px 12px; }
+.shot h3 { margin: 0 0 4px; font-size: 14px; }
+.shot p { margin: 4px 0; font-size: 13px; color: var(--muted); }
+.kicker { font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); margin: 0 0 8px; }
+a { color: var(--accent-2); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>rea-video <span>拆解</span></h1>
+    <p>上传一条视频。本机先切镜头、测画面和声音，再把每个镜头的关键帧交给 DeepSeek 看图，判断是实拍、AI 生成还是代码做的。</p>
+  </header>
+
+  <form class="card" id="form">
+    <div class="row">
+      <div>
+        <label for="key">DeepSeek API Key</label>
+        <input id="key" type="password" autocomplete="off" placeholder="sk-...">
+      </div>
+      <div>
+        <label for="model">模型</label>
+        <input id="model" type="text" value="deepseek-flash" spellcheck="false">
+      </div>
+      <div>
+        <label for="shots">最多看图镜头</label>
+        <input id="shots" type="number" min="1" max="60" value="40">
+      </div>
+    </div>
+    <p class="hint" id="keyhint">看图请用 deepseek-flash。deepseek-chat 不接收图片。密钥只发给本机页面，再由本机请求 api.deepseek.com，不会写入报告。</p>
+    <label for="base">接口地址</label>
+    <input id="base" type="text" value="https://api.deepseek.com" spellcheck="false">
+    <label class="drop" id="drop">
+      <strong>把视频拖到这里，或点击选择</strong>
+      <span class="hint" id="filename">mp4 / mov / webm / mkv，最大 512MB</span>
+      <input id="file" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska,.mp4,.mov,.webm,.mkv,.m4v,.avi">
+    </label>
+    <label class="check"><input id="remember" type="checkbox"> 在这台浏览器记住密钥</label>
+    <button type="submit" id="go">开始拆解</button>
+    <p class="err" id="err" hidden></p>
+  </form>
+
+  <section class="card" id="progress" hidden>
+    <p class="kicker" id="phase">排队中</p>
+    <pre class="log" id="log"></pre>
+  </section>
+
+  <section class="card" id="result" hidden>
+    <p class="kicker">结论</p>
+    <h2 id="verdict" style="font-size:18px;margin:0 0 8px"></h2>
+    <p class="hint" id="vlmline"></p>
+    <div class="mix" id="mix"></div>
+    <p><a id="report" href="#" target="_blank" rel="noopener">打开完整报告</a></p>
+    <div class="shots" id="shots"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const COLORS = {
+  live_action: "14,116,144", ai_video: "124,58,237", avatar: "219,39,119",
+  cg_3d: "37,99,235", code_render: "15,118,110", screen_capture: "22,163,74",
+  still_motion: "180,83,9", static_hold: "120,113,108", anim_2d: "234,88,12",
+  stop_motion: "161,98,7", film_footage: "67,56,202"
+};
+const STORE = "rea-video-deepseek-key";
+let timer = 0;
+let file = null;
+
+function showErr(msg) {
+  $("err").hidden = !msg;
+  $("err").textContent = msg || "";
+}
+
+function setFile(f) {
+  file = f || null;
+  $("filename").textContent = file ? `${file.name} · ${(file.size / 1048576).toFixed(1)} MB` : "mp4 / mov / webm / mkv，最大 512MB";
+}
+
+$("file").addEventListener("change", () => setFile($("file").files[0]));
+["dragover", "dragenter"].forEach((ev) => $("drop").addEventListener(ev, (e) => {
+  e.preventDefault();
+  $("drop").classList.add("over");
+}));
+["dragleave", "drop"].forEach((ev) => $("drop").addEventListener(ev, (e) => {
+  e.preventDefault();
+  $("drop").classList.remove("over");
+}));
+$("drop").addEventListener("drop", (e) => setFile(e.dataTransfer.files[0]));
+
+const saved = localStorage.getItem(STORE);
+if (saved) {
+  $("key").value = saved;
+  $("remember").checked = true;
+}
+
+fetch("/api/config").then((r) => r.json()).then((cfg) => {
+  if (cfg.base_url) $("base").value = cfg.base_url;
+  if (cfg.model && !$("model").value) $("model").value = cfg.model;
+  if (cfg.has_key) $("keyhint").textContent += " 本机已设置 DEEPSEEK_API_KEY，密钥框可以留空。";
+}).catch(() => {});
+
+$("model").addEventListener("input", () => {
+  const name = $("model").value.trim();
+  $("model").classList.toggle("warn", name && !/flash/i.test(name));
+});
+
+function fmt(t) {
+  t = Math.max(0, Number(t) || 0);
+  const m = Math.floor(t / 60);
+  return String(m).padStart(2, "0") + ":" + (t - m * 60).toFixed(2).padStart(5, "0");
+}
+
+function render(job) {
+  const phase = { queued: "排队中", running: "正在拆解", done: "完成", error: "失败" }[job.status] || job.status;
+  $("phase").textContent = phase + (job.filename ? " · " + job.filename : "");
+  $("log").textContent = (job.logs || []).join("\n");
+  $("log").scrollTop = $("log").scrollHeight;
+  $("progress").hidden = false;
+  if (job.status === "error") showErr(job.error || "拆解失败");
+  if (job.status !== "done" || !job.result) return;
+  const r = job.result;
+  $("result").hidden = false;
+  $("verdict").textContent = r.verdict || "";
+  $("vlmline").textContent = r.vlm || "";
+  $("report").href = r.report;
+  $("mix").replaceChildren();
+  (r.mix || []).forEach((m) => {
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.style.flex = String(m.ratio || 0.01);
+    bar.style.background = "rgb(" + (COLORS[m.label] || "80,80,80") + ")";
+    bar.textContent = (m.label_zh || m.label) + " " + Math.round((m.ratio || 0) * 100) + "%";
+    $("mix").appendChild(bar);
+  });
+  $("shots").replaceChildren();
+  (r.shots || []).forEach((s) => {
+    const card = document.createElement("article");
+    card.className = "shot";
+    if (s.thumb) {
+      const img = document.createElement("img");
+      img.src = s.thumb;
+      img.alt = s.id || "";
+      card.appendChild(img);
+    }
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const h = document.createElement("h3");
+    h.textContent = (s.id || "") + " · " + (s.label || "");
+    const time = document.createElement("p");
+    time.textContent = fmt(s.start) + " – " + fmt(s.end) + (s.confidence != null ? " · " + Math.round(s.confidence * 100) + "%" : "");
+    meta.append(h, time);
+    if (s.description) {
+      const d = document.createElement("p");
+      d.textContent = s.description;
+      meta.appendChild(d);
+    }
+    card.appendChild(meta);
+    $("shots").appendChild(card);
+  });
+}
+
+async function poll(id) {
+  const res = await fetch("/api/jobs/" + id);
+  const job = await res.json();
+  render(job);
+  if (job.status === "done" || job.status === "error") {
+    $("go").disabled = false;
+    return;
+  }
+  timer = setTimeout(() => poll(id), 1200);
+}
+
+$("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  showErr("");
+  if (!file) {
+    showErr("请先选择一条视频");
+    return;
+  }
+  if ($("remember").checked) localStorage.setItem(STORE, $("key").value);
+  else localStorage.removeItem(STORE);
+  const body = new FormData();
+  body.append("file", file);
+  body.append("api_key", $("key").value.trim());
+  body.append("model", $("model").value.trim());
+  body.append("base_url", $("base").value.trim());
+  body.append("max_shots", $("shots").value || "40");
+  body.append("lang", "zh");
+  $("go").disabled = true;
+  $("result").hidden = true;
+  $("progress").hidden = false;
+  $("phase").textContent = "上传中";
+  $("log").textContent = "";
+  clearTimeout(timer);
+  try {
+    const res = await fetch("/api/jobs", { method: "POST", body });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "上传失败");
+    poll(data.id);
+  } catch (err) {
+    $("go").disabled = false;
+    showErr(err.message || String(err));
+  }
+});
+</script>
+</body>
+</html>

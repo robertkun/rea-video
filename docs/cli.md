@@ -43,6 +43,13 @@ rea-video decompose ref.mp4 -o out/ref --vlm
 
 open out/ref/report.html
 
+# 2b. 本地网页（DeepSeek 看关键帧）
+pip install -e ".[web]"
+export DEEPSEEK_API_KEY=sk-...          # 也可以在页面里填写，不会写入仓库
+rea-video serve                         # http://127.0.0.1:8765
+# DeepSeek 看图模型是 deepseek-flash，只收图片不收视频。
+# 网页会把每镜关键帧送去推理（REA_VLM_MEDIA=frames）；声音仍由本地分析。
+
 # 3. 没有 VLM，但 agent 自己能看图（zcode、Claude Code 等多模态 agent）：让 agent 当 VLM
 rea-video review out/ref             # 生成逐镜看图任务和答案模板
 rea-video apply-review out/ref --by zcode   # agent 填完答案后并入结论和报告
@@ -86,6 +93,7 @@ rea-video capsule-draft out/ref/breakdown.json --capsule-root $CC --capsule-name
 
 | 命令 | 作用 |
 |---|---|
+| `serve [--host 127.0.0.1] [--port 8765]` | 打开本地网页，上传视频并用 DeepSeek（`deepseek-flash`）看关键帧拆解。需要 `pip install -e ".[web]"`。密钥用页面填写或 `DEEPSEEK_API_KEY`，只留在本机进程里 |
 | `decompose VIDEO [--vlm] [--no-ocr] [--ocr-lang zh\|ja] [--lang zh\|en] [--no-packaging]` | 拆解，输出 breakdown.json、report.html/md、storyboard.jpg、每镜首尾帧，以及 `packaging/`（字幕 SRT、带样式的 ASS、包装时间轴、贴纸截图）；`--lang en` 让结论、报告、`summary` 输出和 VLM 描述都用英文（默认中文；agent 按用户提问的语言选，`rea-video prefs lang en` 可设成默认；breakdown.json 里的 `*_zh` 字段名保留，内容跟报告语言走）；`--no-packaging` 跳过包装层（省约每分钟 30–50 秒）；`--ocr-lang ja` 用日文识别模型读字幕和花字（首次使用自动下载约 10 MB 到 `$REA_VIDEO_MODELS`，离线时可用 `$REA_OCR_REC_MODEL` 指向本地模型），`rea-video prefs ocr_lang ja` 可设成默认 |
 | `review OUT_DIR` | 给能看图的 agent 生成逐镜看图任务（review_tasks.json）和答案模板（review_answers.json） |
 | `apply-review OUT_DIR [ANSWERS] [--by NAME] [--lang zh\|en]` | 把 agent 看图的答案和确定性结果融合，重写 breakdown.json 和报告；`--lang` 可以在这一步换报告语言（结论、证据和报告文字重新生成，VLM 已写好的描述和提示词保持原语言） |

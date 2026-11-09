@@ -388,6 +388,13 @@ def cmd_prefs(args) -> int:
     return 0
 
 
+def cmd_serve(args) -> int:
+    from .web import serve
+
+    serve(host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def cmd_memory(args) -> int:
     from .memory import export_labels, summary_lines
 
@@ -525,6 +532,12 @@ def main(argv: list[str] | None = None) -> int:
     pf.add_argument("--note", help="追加一条给 agent 看的偏好说明，例如「报告尽量短」")
     pf.add_argument("--remove-note", type=int, metavar="N")
     pf.set_defaults(func=cmd_prefs)
+
+    sv = sub.add_parser("serve", help="打开本地网页：上传视频，用 DeepSeek 看关键帧并拆解")
+    sv.add_argument("--host", default="127.0.0.1", help="默认只监听本机")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    sv.set_defaults(func=cmd_serve)
 
     me = sub.add_parser("memory", help="看记住了什么：偏好、常见纠正类型；可导出为评测样本")
     me.add_argument("--export-labels", metavar="YAML")

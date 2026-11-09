@@ -21,6 +21,7 @@ dependencies = [
 # rapidocr 会顺带装 opencv-python（带 GUI 的那套），和上面的 headless 抢同一个 cv2 目录；
 # scripts/install_skill.sh 装完会删掉它、重装 headless。手动安装见 setup.md。
 ocr = ["rapidocr-onnxruntime>=1.3,<2"]
+web = ["fastapi>=0.115", "uvicorn>=0.32", "python-multipart>=0.0.12", "httpx>=0.27"]
 dev = ["pytest>=7", "jsonschema>=4"]
 
 [project.scripts]
@@ -30,7 +31,7 @@ rea-video = "rea_video.cli:main"
 include = ["rea_video*"]
 
 [tool.setuptools.package-data]
-rea_video = ["capabilities/*.yaml", "capabilities/*.json", "capabilities/*.md", "capabilities/models/*.yaml"]
+rea_video = ["capabilities/*.yaml", "capabilities/*.json", "capabilities/*.md", "capabilities/models/*.yaml", "web_static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

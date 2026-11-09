@@ -25,7 +25,7 @@ from . import aspects
 from .faces import shot_faces
 from .visual import LABEL_SHORT, shot_sheet, storyboard
 from .i18n import T, join, semi, set_lang
-from .vlm import SHOT_PROMPT, TAKE_NOTE, WHOLE_PROMPT, VLMClient, VLMConfig, normalize_shot_result, normalize_whole, prompt_lang_note, shot_hints, take_results, vlm_note
+from .vlm import FRAMES_WHOLE_NOTE, SHOT_PROMPT, TAKE_NOTE, WHOLE_PROMPT, VLMClient, VLMConfig, normalize_shot_result, normalize_whole, prompt_lang_note, shot_hints, take_results, vlm_note
 
 
 def _sha256_head(path: Path, limit: int = 64 << 20) -> str:
@@ -59,6 +59,28 @@ def vlm_units(records: list[dict], max_calls: int) -> list[list[dict]]:
 
     keep = sorted(sorted(range(len(units)), key=lambda k: -need(units[k]))[:max_calls])
     return [units[k] for k in keep]
+
+
+def whole_keyframes(records: list[dict], out: Path, limit: int = 12) -> list[tuple[Path, str]]:
+    """Evenly spaced first frames for an image-only whole-video pass."""
+    paths: list[Path] = []
+    for rec in records:
+        rel = (rec.get("assets") or {}).get("first_frame")
+        if not rel:
+            continue
+        path = out / rel
+        if path.is_file():
+            paths.append(path)
+    if len(paths) <= limit:
+        return [(p, "image/jpeg") for p in paths]
+    if limit <= 1:
+        return [(paths[0], "image/jpeg")]
+    picked: list[int] = []
+    for i in range(limit):
+        idx = round(i * (len(paths) - 1) / (limit - 1))
+        if idx not in picked:
+            picked.append(idx)
+    return [(paths[i], "image/jpeg") for i in picked]
 
 
 def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, whole_vlm: bool = True,
@@ -249,9 +271,16 @@ def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, 
                 list(pool.map(run_unit, units))
             if whole_vlm:
                 try:
-                    low = cut_clip(video, 0, info.duration, out / "clips" / "whole_480p.mp4", width=480, audio=True, crf=30)
                     cuts = ", ".join(f"{r['start']:.2f}" for r in shot_records)
-                    whole = normalize_whole(client.ask_json(WHOLE_PROMPT.format(shots=cuts) + prompt_lang_note(), [(low, "video/mp4")], max_tokens=6000))
+                    prompt = WHOLE_PROMPT.format(shots=cuts) + prompt_lang_note()
+                    if cfg.media == "frames":
+                        frames = whole_keyframes(shot_records, out)
+                        if not frames:
+                            raise RuntimeError("no keyframes for the whole-video pass")
+                        whole = normalize_whole(client.ask_json(prompt + FRAMES_WHOLE_NOTE, frames, max_tokens=6000))
+                    else:
+                        low = cut_clip(video, 0, info.duration, out / "clips" / "whole_480p.mp4", width=480, audio=True, crf=30)
+                        whole = normalize_whole(client.ask_json(prompt, [(low, "video/mp4")], max_tokens=6000))
                 except Exception as exc:
                     vlm_info["errors"].append(f"whole: {str(exc)[:160]}")
             asked = [r for u in units for r in u]

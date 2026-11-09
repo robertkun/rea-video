@@ -48,7 +48,25 @@ def fake_server(monkeypatch):
     srv.shutdown()
 
 
+def test_frames_media_sends_jpegs_not_video(media, tmp_path, fake_server, monkeypatch):
+    monkeypatch.setenv("REA_VLM_MEDIA", "frames")
+    start = len(fake_server.seen)
+    b = decompose(media["code"], tmp_path / "frames", use_vlm=True, ocr=False, workers=1, stems=False, packaging=False)
+    assert b["analysis"]["vlm"]["used"] and b["analysis"]["vlm"]["media"] == "frames"
+    new = fake_server.seen[start:]
+    assert new
+    texts = []
+    for body in new:
+        parts = body["messages"][0]["content"]
+        urls = [p["image_url"]["url"] for p in parts if p["type"] == "image_url"]
+        assert urls and all(u.startswith("data:image/jpeg") for u in urls)
+        assert all(not u.startswith("data:video/") for u in urls)
+        texts.append(parts[-1]["text"])
+    assert any("关键帧" in t for t in texts)
+
+
 def test_vlm_fusion_end_to_end(media, tmp_path, fake_server):
+    start = len(fake_server.seen)
     b = decompose(media["code"], tmp_path / "o", use_vlm=True, ocr=False, workers=1, stems=False)
     assert b["analysis"]["vlm"]["used"] and not b["analysis"]["vlm"]["errors"]
     s = b["shots"][0]
@@ -56,7 +74,7 @@ def test_vlm_fusion_end_to_end(media, tmp_path, fake_server):
     assert s["replication"]["executor"] == "code_render_spec"
     assert b["whole_video_vlm"]["summary"] == "测试视频"
     # the shot request carried a video clip and keyframes as data URIs
-    parts = fake_server.seen[0]["messages"][0]["content"]
+    parts = fake_server.seen[start]["messages"][0]["content"]
     kinds = [p["image_url"]["url"].split(";")[0] for p in parts if p["type"] == "image_url"]
     assert kinds[0] == "data:video/mp4" and "data:image/jpeg" in kinds
     # cache hit on second run: no new requests
