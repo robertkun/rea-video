@@ -18,7 +18,7 @@ import cv2
 
 from .classify import LABEL_ZH
 from .aspects.camera import SUPPORT_ZH
-from .plan import CODE_STYLES, Planner, code_scene, shot_prompts
+from .plan import CODE_STYLES, Planner, code_scene, footage_plan_text, shot_prompts
 
 GEN_LABELS = ("ai_video", "cg_3d", "anim_2d")
 SHOOT_LABELS = ("live_action", "stop_motion")
@@ -502,7 +502,7 @@ def summary_line(plan: dict, b: dict) -> str:
         bits.append(T("静图推拉/静帧 {n} 镜 → 本地重建", "still-image move / static frame {n} shot{s} → rebuilt locally", n=n, s=_s(n)))
     if plan.get("footage"):
         n = sum(len(f["shots"]) for f in plan["footage"])
-        bits.append(T("影视片段 {n} 镜 → 找原片剪辑", "film / TV footage {n} shot{s} → cut from the source", n=n, s=_s(n)))
+        bits.append(T("影视片段 {n} 镜 → AI 分镜脚本", "film / TV footage {n} shot{s} → an AI storyboard", n=n, s=_s(n)))
     if plan["avatar"]:
         n = len(plan["avatar"])
         bits.append(T("数字人 {n} 镜 → TTS + 数字人驱动", "digital avatar {n} shot{s} → TTS + avatar driver", n=n, s=_s(n)))
@@ -512,7 +512,7 @@ def summary_line(plan: dict, b: dict) -> str:
 def report_md(plan: dict) -> list[str]:
     if not plan:
         return []
-    L = ["", T("## 复刻方案", "## Remake plan"), "", f"**{plan['summary']}**", ""]
+    L = ["", T("## 复刻方案", "## Remake plan"), "", f"**{footage_plan_text(plan['summary'])}**", ""]
     if plan.get("engine_note"):
         L += [f"- {plan['engine_note']}"]
     if plan["units"]:
@@ -624,10 +624,10 @@ def report_md(plan: dict) -> list[str]:
         L += ["", T("### 本地重建", "### Local rebuild"), "", "- " + semi().join(f"#{x['shot']} {x['label_zh']} {x['duration']:.1f}s" for x in plan["local"])
               + T("：一张图 + 测得的缩放/平移参数，ffmpeg 直接出", ": one image + the measured zoom / pan parameters, rendered straight from ffmpeg")]
     if plan.get("footage"):
-        L += ["", T("### 影视原片", "### Film / TV source"), "",
-              T("- 这些镜头剪自已有的影视作品：找到原片对应片段再剪，版权属于片方，商用要授权；不用原片时按同样景别、机位和打光自己拍，或用 AI 做近似画面",
-                "- These shots are cut from existing films or series: find the same clips in the source and cut them; rights belong to the studio and commercial use needs a licence. "
-                "Without the source, shoot them yourself with the same shot size, camera setup and lighting, or approximate them with AI"), ""]
+        L += ["", T("### 影视片段", "### Film / TV shots"), "",
+              T("- 这些镜头按下面的分镜脚本用 AI 视频生成。脚本可直接复制。原片版权属于片方，商用要授权。",
+                "- Remake these shots with the AI storyboard below. The script can be copied. "
+                "Rights in the source belong to the studio; commercial use needs a licence."), ""]
         for f in plan["footage"]:
             L.append(f"- {f['start']:.1f}–{f['end']:.1f}s " + T("{n} 镜", "{n} shot{s}", n=len(f["shots"]), s=_s(len(f["shots"]))))
     return L

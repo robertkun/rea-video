@@ -3,6 +3,7 @@ models are candidates, and how capsule-cinema (or local ffmpeg) would execute it
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -36,7 +37,7 @@ NOTE = LangDict({
     "static_hold": "静帧：一张图定格即可",
     "anim_2d": "2D 动画：先出角色设定图定画风，再首尾帧生成；要精确口型和动作时做 AE / Live2D / Spine 工程",
     "stop_motion": "定格动画：首选真的拍（手机固定 + 定格 App，每秒约 12 张）；AI 生成只能近似顿挫感",
-    "film_footage": "影视片段：画面剪自已有的电影/电视剧/短剧，复刻要找到原片对应片段再剪（版权属于片方，商用要授权）；不用原片时，按同样景别、机位和打光自己拍，或用 AI 做近似画面",
+    "film_footage": "按这一镜的景别、运镜、节奏和时长写成可直接生成的 AI 分镜脚本；原片版权属于片方，商用要授权，这里给的是可生成的近似方案",
 }, en={
     "ai_video": "Source is AI-generated: use the shot's first and last frames for first/last-frame generation to closely match composition and motion; to change the subject, edit the first frame with an image model first",
     "live_action": "Source is live action: reshoot per the shooting plan (shot size / camera setup / lighting); only fall back to AI image-to-video (first frame as reference) when a shoot is not possible",
@@ -48,7 +49,7 @@ NOTE = LangDict({
     "static_hold": "Static frame: one held image is enough",
     "anim_2d": "2D animation: make a character sheet to lock the style, then first/last-frame generation; for precise lip sync and motion, build an AE / Live2D / Spine project",
     "stop_motion": "Stop motion: shooting for real is the first choice (phone locked off + a stop-motion app, about 12 frames per second); AI generation only approximates the stepped feel",
-    "film_footage": "Film / TV footage: the picture is cut from an existing film, series or short drama; a remake has to find the same clip in the source and cut it (rights belong to the studio, commercial use needs a licence); without the source, shoot it yourself with the same shot size, camera setup and lighting, or approximate it with AI",
+    "film_footage": "Write an AI storyboard from this shot's size, camera move, rhythm and duration; the source film's rights belong to the studio and commercial use needs a licence, so this is a generatable approximation",
 })
 # AI edits on filmed footage: what was done, which routing rule rebuilds it, how in one line
 AI_EDITS = {
@@ -76,8 +77,260 @@ def shot_prompts(shot: dict) -> dict:
     """Reverse-engineered prompts for one shot: the agent's review wins over the VLM (it is the later, checked pass)."""
     out = {}
     for src in ((shot.get("vlm") or {}).get("replication") or {}, (shot.get("review") or {}).get("replication") or {}):
-        out.update({k: v for k, v in src.items() if k in ("image_prompt", "video_prompt", "video_prompt_en") and v})
+        out.update({k: v for k, v in src.items() if k in ("image_prompt", "video_prompt", "video_prompt_en", "storyboard_script") and v})
     return out
+
+
+_TRANS_IN = LangDict(
+    {"start": "片段开头，入点没有转场", "cut": "入点硬切", "jump": "入点跳剪", "flash": "入点闪白",
+     "fade": "入点淡入", "dissolve": "入点叠化", "wipe": "入点划像", "mg_transition": "入点是版式切换"},
+    en={"start": "opens the clip, no transition in", "cut": "hard cut in", "jump": "jump cut in", "flash": "flash cut in",
+        "fade": "fade in", "dissolve": "dissolve in", "wipe": "wipe in", "mg_transition": "layout change in"},
+)
+
+
+def footage_plan_text(text: str) -> str:
+    """Older reports stored a 'find the source film' remake line. Show the AI storyboard instead."""
+    raw = str(text or "")
+    return (raw.replace("找原片剪辑", "AI 分镜脚本")
+            .replace("cut from the source film", "an AI storyboard")
+            .replace("cut from the source", "an AI storyboard"))
+
+
+def storyboard_script(shot: dict) -> dict[str, str]:
+    """One shot as an AI storyboard: logic, a generation prompt, and a one-line copy.
+    A storyboard_script already written by the model is kept. Original dialogue is added from the shot."""
+    dialogue = " ".join(str(shot.get("dialogue_line") or "").split())
+    stored = str(shot_prompts(shot).get("storyboard_script") or "").strip()
+    if stored:
+        copy = _third_part(stored) or stored.replace("\n", " ")
+        result = {"logic": "", "prompt": "", "copy": copy, "text": stored}
+    else:
+        result = _composed_storyboard(shot)
+    return _with_dialogue(result, dialogue)
+
+
+def _third_part(text: str) -> str:
+    for mark in ("三、", "三，", "三."):
+        at = text.find(mark)
+        if at >= 0:
+            return " ".join(text[at + len(mark):].split())
+    return ""
+
+
+def _composed_storyboard(shot: dict) -> dict[str, str]:
+    v = shot.get("review") or shot.get("vlm") or {}
+    if not isinstance(v, dict):
+        v = {}
+    prompts = shot_prompts(shot)
+    asp = shot.get("aspects") or {}
+    fr = ((asp.get("framing") or {}).get("result") or {})
+    cam = (asp.get("camera") or {})
+    cam_r = cam.get("result") or {}
+    cam_m = cam.get("measured") or {}
+    li = ((asp.get("lighting") or {}).get("result") or {})
+    grade = ((asp.get("grade") or {}).get("result") or {})
+    features = shot.get("features") or {}
+    try:
+        dur = float(shot.get("duration") or 0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    size = str(fr.get("shot_size") or v.get("shot_size") or "").strip()
+    angle = str(fr.get("camera_angle") or "").strip()
+    position = str(fr.get("position") or "").strip()
+    move = _move_phrase(str(cam_r.get("move") or v.get("camera_move") or "").strip(), cam_m, features)
+    picture = " ".join(str(v.get("description") or prompts.get("video_prompt") or prompts.get("image_prompt") or "").split())
+    if size:
+        picture = re.sub(r"[，,]?\s*画面为(?:大特写|特写|近景|中景|全景|远景)", "", picture).strip("，, ")
+    light = T("，", ", ").join(x for x in (
+        li.get("setup_name"), li.get("key_direction") and T("主光{k}", "key light {k}", k=li["key_direction"]),
+        li.get("quality"), li.get("color_temp"), grade.get("look"),
+    ) if x)
+    beats = [t for t in (shot.get("beats") or []) if isinstance(t, (int, float))]
+    if beats:
+        rhythm = T("卡点在 {t}", "beats at {t}", t=T("、", ", ").join(f"{t:.2f}s" for t in beats))
+    else:
+        rhythm = T("镜内没有单独的动作重音或鼓点，运动匀速，整镜 {d:.2f} 秒就是这一拍",
+                   "no separate action or music hit inside the shot; the move is even, and the whole {d:.2f}s is the beat",
+                   d=dur)
+    trans = _TRANS_IN.get(str(shot.get("transition_in") or ""), T("入点转场未标", "transition in not marked"))
+    framing = T("，", ", ").join(x for x in (
+        size and T("景别{s}", "{s}", s=size),
+        angle,
+        position and T("主体{p}", "subject {p}", p=position),
+    ) if x)
+    logic = T(
+        "这一镜 {d:.2f} 秒。{fr}。运镜：{mv}。节奏：{rh}。转场：{tr}。",
+        "This shot is {d:.2f}s. {fr}. Camera: {mv}. Rhythm: {rh}. Transition: {tr}.",
+        d=dur, fr=framing or T("景别待看图", "shot size not read"), mv=move, rh=rhythm, tr=trans,
+    )
+    prompt = T("，", ", ").join(x for x in (
+        size, angle, move and T("运镜{m}", "camera {m}", m=move),
+        dur and T("时长{d:.2f}秒", "{d:.2f}s", d=dur),
+    ) if x)
+    if picture:
+        prompt = (prompt + T("。", ". ") + picture) if prompt else picture
+    else:
+        prompt += T("。画面按这一镜的参考帧，保持原片氛围。", ". Match this shot's reference frame and keep the original atmosphere.")
+    if light:
+        if prompt and prompt[-1] not in "。.!？?":
+            prompt += T("。", ". ")
+        prompt += T("光线与质感：{l}。", "Light and texture: {l}.", l=light)
+    if picture:
+        prompt += T("保持原片氛围。", " Keep the original atmosphere.")
+    copy = T(
+        "{d:.2f}s，{size}，运镜：{mv}。",
+        "{d:.2f}s, {size}, camera: {mv}. ",
+        d=dur, size=size or T("景别见提示词", "shot size in the prompt"), mv=move,
+    ) + (picture or light or T("按参考帧生成", "generate from the reference frame"))
+    text = "\n".join([
+        T("一、分镜逻辑", "1. Shot logic"),
+        logic,
+        T("二、AI 视频提示词", "2. AI video prompt"),
+        prompt or T("画面内容需要看图补全。", "The picture still needs to be described from the frames."),
+        T("三、可直接复制", "3. Copy"),
+        copy,
+    ])
+    return {"logic": logic, "prompt": prompt, "copy": " ".join(copy.split()), "text": text}
+
+
+def _with_dialogue(result: dict[str, str], dialogue: str) -> dict[str, str]:
+    spoken = " ".join(str(dialogue or "").split())
+    if not spoken or spoken in (result.get("text") or ""):
+        return result
+    line = T("对白：{d}", "Dialogue: {d}", d=spoken)
+
+    def _add(body: str) -> str:
+        body = body or ""
+        if not body or spoken in body:
+            return body
+        if body[-1] not in "。.!？?":
+            body += T("。", ". ")
+        if line[-1] in "。.!？?":
+            return body + line
+        return body + line + T("。", ".")
+
+    logic = _add(result.get("logic") or "")
+    prompt = _add(result.get("prompt") or "")
+    copy = " ".join(_add(result.get("copy") or "").split())
+    if logic and prompt and copy:
+        text = "\n".join([
+            T("一、分镜逻辑", "1. Shot logic"), logic,
+            T("二、AI 视频提示词", "2. AI video prompt"), prompt,
+            T("三、可直接复制", "3. Copy"), copy,
+        ])
+    else:
+        text = (result.get("text") or "").rstrip() + "\n" + line
+    return {"logic": logic, "prompt": prompt, "copy": copy, "text": text}
+
+
+def _media_duration(path: Path) -> float:
+    if not path.is_file():
+        return 0.0
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        return max(0.0, float((proc.stdout or "").strip()))
+    except ValueError:
+        return 0.0
+
+
+def _dialogue_source(video: Path) -> tuple[Path | None, float]:
+    """Transcript file and how many seconds into that video this file begins."""
+    if video.parent.name.endswith(".cuts") and re.fullmatch(r"\d{3}", video.stem):
+        offset = 0.0
+        for sib in sorted(video.parent.glob("[0-9][0-9][0-9].mp4")):
+            if not sib.stem.isdigit() or int(sib.stem) >= int(video.stem):
+                break
+            offset += _media_duration(sib)
+        stem = video.parent.name[:-5]
+        for ext in (".mp4", ".mov", ".mkv", ".webm"):
+            parent = video.parent.parent / f"{stem}{ext}"
+            transcript = parent.with_name(parent.stem + ".transcript.txt")
+            if transcript.is_file():
+                return transcript, offset
+        return None, offset
+    transcript = video.with_name(video.stem + ".transcript.txt")
+    return (transcript, 0.0) if transcript.is_file() else (None, 0.0)
+
+
+def stamp_shot_dialogue(breakdown: dict) -> None:
+    """Put each shot's original spoken lines on shot['dialogue_line'], timed to this file."""
+    source = breakdown.get("source") if isinstance(breakdown.get("source"), dict) else {}
+    video = Path(str(source.get("path") or ""))
+    transcript, offset = _dialogue_source(video)
+    text = ""
+    if transcript is not None:
+        try:
+            text = transcript.read_text(encoding="utf-8").strip()
+        except OSError:
+            text = ""
+    origin = video
+    if transcript is not None and video.parent.name.endswith(".cuts"):
+        stem = video.parent.name[:-5]
+        for ext in (".mp4", ".mov", ".mkv", ".webm"):
+            parent = video.parent.parent / f"{stem}{ext}"
+            if parent.is_file():
+                origin = parent
+                break
+    duration = _media_duration(origin) or float(source.get("duration") or 0) + offset
+    sentences = dialogue_spans_local(text, duration)
+    for shot in breakdown.get("shots") or []:
+        if not isinstance(shot, dict):
+            continue
+        start = float(shot.get("start") or 0) + offset
+        end = float(shot.get("end") or 0) + offset
+        shot["dialogue_line"] = dialogue_window(sentences, start, end)
+
+
+def dialogue_spans_local(text: str, duration: float) -> list[tuple[float, float, str]]:
+    parts = [part.strip() for part in re.split(r"(?<=[。！？!?])", str(text or "")) if part.strip()]
+    try:
+        total = float(duration)
+    except (TypeError, ValueError):
+        total = 0.0
+    if not parts or total <= 0:
+        return []
+    weight = sum(len(part) for part in parts) or 1
+    cursor = 0.0
+    spans = []
+    for part in parts:
+        span = total * len(part) / weight
+        spans.append((cursor, cursor + span, part))
+        cursor += span
+    return spans
+
+
+def dialogue_window(spans: list[tuple[float, float, str]], start: float, end: float) -> str:
+    hits = []
+    for begin, finish, sentence in spans:
+        if min(finish, end) - max(begin, start) >= 0.2:
+            hits.append(sentence)
+    return "".join(hits)
+
+
+def _move_phrase(move: str, measured: dict, features: dict) -> str:
+    """Camera move in words, from the measured move rather than a fixed-tripod label that disagrees with it."""
+    zoom = features.get("zoom_per_s") or measured.get("zoom_per_s") or 0
+    try:
+        zoom = float(zoom)
+    except (TypeError, ValueError):
+        zoom = 0.0
+    smooth = features.get("camera") == "smooth_move" or measured.get("motion") == "smooth_move"
+    name = {"推": T("推进", "push in"), "拉": T("拉远", "pull out"), "摇": T("横摇", "pan"), "移": T("横移", "track"),
+            "跟": T("跟拍", "follow"), "环绕": T("环绕", "orbit"), "手持": T("手持", "handheld"),
+            "摇/移": T("摇移", "pan / track"), "固定": T("固定", "locked off")}.get(move, move)
+    if not name and (measured.get("support") == "moving" or smooth):
+        name = T("移动机位", "moving camera")
+    if not name:
+        name = T("固定", "locked off")
+    if smooth and name not in (T("固定", "locked off"),):
+        name = T("平滑", "smooth ") + name
+    if abs(zoom) >= 0.01 and move in ("推", "拉", ""):
+        name += T("，约每秒{z:.1%}", ", about {z:.1%} per second", z=abs(zoom))
+    return name
 
 
 def _where(cx: float | None, cy: float | None) -> tuple[str, str] | None:

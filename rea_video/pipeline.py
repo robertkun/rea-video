@@ -39,6 +39,23 @@ def _sha256_head(path: Path, limit: int = 64 << 20) -> str:
 TAKE_MAX_S, TAKE_MAX_PIECES = 12.0, 8  # one VLM look at most this long / this many jump-cut pieces
 
 
+def _spread_shots(records: list[dict], limit: int) -> list[dict]:
+    """Pick shots spread across the start, middle, and end. ``limit`` is how many pictures to send."""
+    if limit <= 0 or len(records) <= limit:
+        return list(records)
+    if limit == 1:
+        return [records[len(records) // 2]]
+    chosen: list[dict] = []
+    seen: set[int] = set()
+    for index in range(limit):
+        position = round(index * (len(records) - 1) / (limit - 1))
+        if position in seen:
+            continue
+        seen.add(position)
+        chosen.append(records[position])
+    return chosen
+
+
 def vlm_units(records: list[dict], max_calls: int) -> list[list[dict]]:
     """Group shots for the VLM: jump-cut pieces of one take (same camera setup, cut apart in the edit) are one
     clip and one call; every other shot is its own call. Past `max_calls`, the calls go to the units the
@@ -86,8 +103,8 @@ def whole_keyframes(records: list[dict], out: Path, limit: int = 12) -> list[tup
 
 def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, whole_vlm: bool = True,
               ocr: bool = True, workers: int = 3, engine: str = "seedance2.0", max_shots_vlm: int = 60,
-              platform_meta: dict | None = None, stems: bool = True, memory: bool = True, packaging: bool = True,
-              lang: str = "zh") -> dict:
+              vlm_images: int = 0, platform_meta: dict | None = None, stems: bool = True, memory: bool = True,
+              packaging: bool = True, lang: str = "zh") -> dict:
     lang = set_lang(lang)
     require_tools()
     t0 = time.time()
@@ -236,9 +253,12 @@ def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, 
                     clip = cut_clip(video, first["start"], min(span, 12.0), out / "clips" / f"{first['id']}.mp4", width=480)
                     media.append((clip, "video/mp4"))
                 if cfg.media in ("both", "frames"):
-                    mid = unit[len(unit) // 2]
-                    media += [(out / first["assets"]["first_frame"], "image/jpeg"), (out / mid["assets"]["sheet"], "image/jpeg"),
-                              (out / last["assets"]["last_frame"], "image/jpeg")]
+                    if image_limit:
+                        media.append((out / first["assets"]["first_frame"], "image/jpeg"))
+                    else:
+                        mid = unit[len(unit) // 2]
+                        media += [(out / first["assets"]["first_frame"], "image/jpeg"), (out / mid["assets"]["sheet"], "image/jpeg"),
+                                  (out / last["assets"]["last_frame"], "image/jpeg")]
                 lead = max(unit, key=lambda r: r["duration"])
                 dl, dp = top(lead["deterministic"]["probs"])
                 prompt = SHOT_PROMPT.format(hints=shot_hints(lead["features"], lead["deterministic"]["facts"], dl, dp))
@@ -267,7 +287,11 @@ def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, 
                     if len(unit) > 1:
                         rec["vlm"]["take"] = {"shots": [r["index"] for r in unit], "piece": i + 1}
 
-            units = vlm_units(shot_records, max_shots_vlm)
+            image_limit = vlm_images if isinstance(vlm_images, int) and vlm_images > 0 else 0
+            if image_limit:
+                units = [[record] for record in _spread_shots(shot_records, image_limit)]
+            else:
+                units = vlm_units(shot_records, max_shots_vlm)
             asked_records = [record for unit in units for record in unit]
             progress = {"seen": 0, "calls": 0}
             progress_lock = threading.Lock()
@@ -299,7 +323,8 @@ def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, 
             log_vlm_progress("shots")
             with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
                 list(pool.map(run_unit_counted, units))
-            if whole_vlm:
+            expect_whole = whole_vlm and image_limit <= 0
+            if expect_whole:
                 log_vlm_progress("whole")
                 try:
                     cuts = ", ".join(f"{r['start']:.2f}" for r in shot_records)
@@ -325,7 +350,7 @@ def decompose(video: str | Path, out_dir: str | Path, *, use_vlm: bool = False, 
                 whole_ok=whole is not None,
                 tokens={"prompt": usage["prompt"], "completion": usage["completion"], "total": usage["total"]},
             )
-            if ok_shots == len(asked) and (whole is not None or not whole_vlm):
+            if ok_shots == len(asked) and (whole is not None or not expect_whole):
                 vlm_info.update(used=True, status="ok")
             elif ok_shots or whole is not None:
                 vlm_info.update(used=True, status="partial")

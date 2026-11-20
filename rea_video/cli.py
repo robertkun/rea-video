@@ -59,9 +59,10 @@ def cmd_decompose(args) -> int:
     lang = args.lang or pref("lang", "zh")
     if lang not in LANGS:
         raise SystemExit(f"错误：不支持的报告语言 {lang}（可选：{', '.join(LANGS)}）")
+    image_limit = args.vlm_images if isinstance(args.vlm_images, int) and args.vlm_images > 0 else 0
     b = decompose(args.video, out, use_vlm=use_vlm, whole_vlm=not args.no_whole, ocr=not args.no_ocr,
                   workers=args.workers, engine=args.engine or pref("engine", "seedance2.0"), platform_meta=meta, stems=stems,
-                  packaging=not args.no_packaging, lang=lang)
+                  packaging=not args.no_packaging, lang=lang, vlm_images=image_limit)
     print(json.dumps({"out": str(out), "verdict": b["summary"]["verdict"], "shots": b["summary"]["shots"],
                       "confidence": b["summary"]["confidence"], "vlm": b["summary"]["vlm"],
                       "report": str(out / "report.html")}, ensure_ascii=False, indent=2))
@@ -422,6 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--ocr-lang", choices=OCR_LANGS, help="字幕/花字的语言：zh 中英（默认）、ja 日文（首次使用自动下载识别模型）；也可用 prefs ocr_lang 设成默认")
     d.add_argument("--no-packaging", action="store_true", help="跳过剪辑包装层（整片字幕时间轴、花字、贴纸/动图、音效卡点）；省掉约每分钟 30–50 秒")
     d.add_argument("--lang", choices=LANGS, help="报告、结论和 VLM 描述的语言：zh（默认）/ en；按用户提问的语言选，也可用 prefs lang 设成默认")
+    d.add_argument("--vlm-images", type=int, default=0, help="看图时只送这么多张，从开头、中间、结尾均匀取样。0 表示每个镜头都看")
     d.add_argument("--workers", type=int, default=3)
     d.add_argument("--engine", help="复刻计划使用的 capsule-cinema 视频引擎（默认 prefs 里的 engine，否则 seedance2.0）")
     d.add_argument("--meta", help='平台元数据 JSON，例如 {"music": {"title": "xx", "author": "yy", "is_original": false, "popular": true}}')

@@ -161,11 +161,17 @@ class VLMClient:
             return dict(self.usage)
 
     def _post(self, model: str, content: list[dict], max_tokens: int) -> tuple[str, dict]:
+        lower = model.lower()
         payload = {"model": model, "messages": [{"role": "user", "content": content}],
                    "max_tokens": max_tokens, "temperature": 0.2}
         # DeepSeek V4 默认会把额度用在思考上，正文为空，分镜提示词就写不出来。
-        if "deepseek" in model.lower():
+        if "deepseek" in lower:
             payload["thinking"] = {"type": "disabled"}
+        if "nemotron" in lower:
+            payload["temperature"] = 0.6
+            payload["top_p"] = 0.95
+            payload["max_tokens"] = max(max_tokens, 65536)
+            payload["reasoning_budget"] = 16384
         body = json.dumps(payload).encode()
         req = urllib.request.Request(self.cfg.base_url + "/chat/completions", data=body, method="POST",
                                      headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.cfg.api_key}"})
@@ -179,6 +185,9 @@ class VLMClient:
             raise ValueError(f"no answer in VLM response: {str(data)[:160]}") from exc
         if isinstance(content, list):  # some gateways return content parts
             content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if not isinstance(content, str) or not content.strip():
+            message = data["choices"][0]["message"] if data.get("choices") else {}
+            content = str((message or {}).get("reasoning_content") or "")
         if not isinstance(content, str) or not content.strip():
             raise ValueError("empty VLM answer")
         return content, usage
@@ -239,7 +248,7 @@ SHOT_PROMPT = """你是视频制作逆向工程专家。判断这个镜头的「
 - static_hold：静帧定格（图片或卡片停留不动）
 - anim_2d：2D 动画（手绘逐帧、Live2D、AE/Spine 角色动画、扁平插画风动画）：线条和平涂色块、角色有骨骼或逐帧动作，常见"一拍二"（每两帧才变一次）
 - stop_motion：定格动画（黏土、毛毡、纸偶、乐高等实物逐帧拍摄）：真实材质和灯光、动作一顿一顿、帧间轻微闪烁、指纹和纹理细节
-- film_footage：剪进来的已有影视作品画面（电影、电视剧、网剧、竖屏短剧的片段，影视解说、混剪、名场面合集常见）：认得出的演员或剧集、专业剧组的布光和多机位、大量群演和成套布景、片头片尾字幕、台标或平台水印、嵌在黑边里的宽画幅
+- film_footage：剪进来的已有影视作品画面（电影、电视剧、网剧、竖屏短剧的片段，影视解说、混剪、名场面合集常见）：认得出的演员或剧集、专业剧组的布光和多机位、大量群演和成套布景、片头片尾字幕、台标或平台水印、嵌在黑边里的宽画幅。判成影视片段时，复刻仍要写成可生成的分镜脚本，不要写成去找原片
 
 如果画面是实拍或写实画面，再拆「怎么拍、怎么打光」（aspects 里各项），纯图形/文字/界面画面这些字段写"不适用"。
 
@@ -278,7 +287,8 @@ AI 仿定格风格（材质在帧间漂移）与真正的定格动画（同一�
   "replication": {{
     "image_prompt": "复刻首帧的中文图像提示词（主体、构图、光线、风格，具体可执行）",
     "video_prompt": "复刻该镜头的中文视频提示词：写清动作过程和结束状态、运镜；只写想要的内容，不写否定句",
-    "video_prompt_en": "same video prompt in English"
+    "video_prompt_en": "same video prompt in English",
+    "storyboard_script": "分三段，段首分别是「一、」「二、」「三、」。一、拆这一镜的分镜逻辑：景别、运镜方式、节奏卡点、入点转场，写具体。二、据此写一条可直接交给主流 AI 视频工具的中文提示词，保留原片氛围、光线和质感。三、收成可直接复制的一行，标出关键运镜和时长（秒）。判成影视原片时也写这三段，不要写去找原片"
   }}
 }}"""
 

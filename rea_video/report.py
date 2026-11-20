@@ -15,6 +15,7 @@ from . import aspects, entities
 from .classify import LABEL_ZH
 from .i18n import LangDict, T, join, lang, semi
 from .packaging import layer_name, anchor_text
+from .plan import footage_plan_text, stamp_shot_dialogue, storyboard_script
 from .production import report_md as production_md
 from .util import fmt_time
 from .visual import LABEL_COLOR
@@ -38,10 +39,10 @@ MODE_ZH = LangDict({"music": "背景音乐", "voice": "人声", "sfx": "音效"}
 # how a shot gets remade, in words (the rule ids stay in breakdown.json for agents)
 ROUTE_ZH = LangDict({"ai_video": "AI 生成（首尾帧）", "live_action": "实拍", "avatar": "TTS + 数字人", "cg_3d": "AI 生成 / 3D 渲染",
                      "code_render": "代码渲染", "screen_capture": "录屏重建", "still_motion": "本地 ffmpeg 推拉", "static_hold": "静帧",
-                     "anim_2d": "AI 生成（2D 动画）", "stop_motion": "实拍定格", "film_footage": "找原片剪辑"},
+                     "anim_2d": "AI 生成（2D 动画）", "stop_motion": "实拍定格", "film_footage": "AI 分镜脚本"},
                     en={"ai_video": "AI generation (first / last frame)", "live_action": "reshoot", "avatar": "TTS + avatar", "cg_3d": "AI generation / 3D render",
                         "code_render": "code render", "screen_capture": "screen recording", "still_motion": "local ffmpeg move", "static_hold": "static frame",
-                        "anim_2d": "AI generation (2D animation)", "stop_motion": "stop motion shoot", "film_footage": "cut from the source film"})
+                        "anim_2d": "AI generation (2D animation)", "stop_motion": "stop motion shoot", "film_footage": "AI storyboard"})
 SFX_SRC_ZH = LangDict({"vlm": "听到", "deterministic": "信号候选（低置信）", "review": "看图复核", "merged": "听到 + 信号"},
                       en={"vlm": "heard", "deterministic": "signal candidate (low confidence)", "review": "agent review", "merged": "heard + signal"})
 ENDING_ZH = LangDict({"natural_end": "自然结束", "fade_out": "淡出", "hard_cut": "硬切断"}, en={"natural_end": "ends naturally", "fade_out": "fades out", "hard_cut": "cut off hard"})
@@ -162,7 +163,7 @@ def _head_md(b: dict) -> list[str]:
          T("- 判断置信度（按时长加权）{c:.0%}；判定方式：{by}；{vlm}", "- Confidence (duration-weighted) {c:.0%}; decided by: {by}; {vlm}",
            c=s["confidence"], by=_decided_by(b), vlm=s.get("vlm") or vlm_note(b["analysis"]["vlm"], b["analysis"].get("review")))]
     if s.get("production"):
-        L.append(T("- 复刻：{p}（方案见「复刻方案」）", "- Remake: {p} (see “Remake plan”)", p=s["production"]))
+        L.append(T("- 复刻：{p}（方案见「复刻方案」）", "- Remake: {p} (see “Remake plan”)", p=footage_plan_text(s["production"])))
     qs = entities.open_questions(b)
     if qs:
         L.append(T("- ⚠️ 待确认 {n} 处，先看「不确定点」：{q}", "- ⚠️ {n} open questions, see “Open questions” first: {q}", n=len(qs),
@@ -469,6 +470,19 @@ def _remake_md(b: dict) -> list[str]:
             for a in (r.get("material") or {}).get("references", []):
                 L.append(T("- 镜头 #{i}（{t}）：{k}", "- Shot #{i} ({t}): {k}", i=r["index"], t=fmt_time(r["start"]), k=a["kind_zh"])
                          + (f"{T('，', ', ')}{a['description']}" if a.get("description") else ""))
+    blocks = []
+    for r in b.get("shots") or []:
+        script = storyboard_script(r)
+        if script.get("text"):
+            blocks.append((r, script))
+    if blocks:
+        L += ["", T("### 分镜脚本", "### Storyboard script"), "",
+              T("每一镜按三步写：先拆景别、运镜、节奏和转场，再写成可交给 AI 视频工具的提示词，最后收成可直接复制的一行。",
+                "Each shot is written in three steps: shot size, camera, rhythm and transition; then a prompt for an AI video tool; then one line you can copy."),
+              ""]
+        for r, script in blocks:
+            L += [T("**#{i} {t} · {d:.2f}s**", "**#{i} {t} · {d:.2f}s**", i=r["index"], t=fmt_time(r["start"]), d=r["duration"]),
+                  "", "```text", script["text"], "```", ""]
     return L
 
 
@@ -477,9 +491,12 @@ def _shotlist_md(b: dict) -> list[str]:
     rows = []
     for r in b["shots"]:
         base = r["base"]
-        desc = ((r.get("vlm") or r.get("review") or {}).get("description") or "").replace("\n", " ")
+        desc = " ".join(str(((r.get("vlm") or r.get("review") or {}).get("description") or "")).split())
+        script = storyboard_script(r)
+        picture = script.get("prompt") or desc
+        remake = script.get("copy") or _route(r, units)
         rows.append([r["index"], fmt_time(r["start"]), f"{r['duration']:.2f}s", f"{base['label_zh']} {base['confidence']:.0%}", _origin(r), _layers(r),
-                     CAMERA_ZH.get(r["features"].get("camera", "unknown"), "—"), desc[:40] + ("…" if len(desc) > 40 else ""), _route(r, units)])
+                     CAMERA_ZH.get(r["features"].get("camera", "unknown"), "—"), picture or "—", remake])
     return ["", T("## 分镜表", "## Shot list")] + _table(
         ["#", T("时间", "Time"), T("时长", "Length"), T("底层画面", "Base picture"), T("素材来源", "Material"), T("叠加层", "Overlays"), T("运镜", "Camera"),
          T("画面", "Picture"), T("复刻", "Remake")], rows)
@@ -524,7 +541,12 @@ def _shot_detail_md(r: dict) -> list[str]:
         kind = T("画面内容文字", "text in the picture") if intrinsic else KIND_ZH.get(tr["kind"], tr["kind"])
         L.append(T("- 文字轨（{k}/{b}）：", "- Text track ({k}/{b}): ", k=kind, b=tr["band"]) + " / ".join(t[:40] for t in tr["texts"][:4]))
     rep = r["replication"]
-    L.append(T("- 复刻：{n}", "- Remake: {n}", n=rep["note"]))
+    script = storyboard_script(r)
+    if script.get("text"):
+        L.append(T("- 复刻：{n}", "- Remake: {n}", n=script["copy"]))
+        L += ["", "```text", script["text"], "```"]
+    else:
+        L.append(T("- 复刻：{n}", "- Remake: {n}", n=footage_plan_text(rep.get("note") or "")))
     if rep.get("capsule", {}).get("image_prompt"):
         L.append(T("  - 首帧图像提示词：{p}", "  - First-frame image prompt: {p}", p=rep["capsule"]["image_prompt"]))
     if rep.get("capsule", {}).get("prompt"):
@@ -555,6 +577,7 @@ def _appendix_md(b: dict) -> list[str]:
 
 
 def markdown(b: dict) -> str:
+    stamp_shot_dialogue(b)
     L = _head_md(b) + _content_md(b) + _cast_md(b) + _audio_md(b) + _visual_md(b) + packaging_md(b) + _remake_md(b) + _shotlist_md(b) + _questions_md(b) + _appendix_md(b)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(L)).strip() + "\n"
 
